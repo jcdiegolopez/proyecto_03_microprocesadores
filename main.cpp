@@ -3,27 +3,45 @@
 #include <unistd.h>
 #include <vector>
 #include <chrono>
+#include <random>
+
 
 // Estructura para manejar los proyectiles
 struct projectilePlayer {
     int x, y; // Posición del proyectil
 };
 
+// Estructura para movimiento de los aliens
+struct Alien {
+    int x, y;
+    bool direction;  // true: derecha, false: izquierda
+};
+
 // Variables globales compartidas
+std::vector<Alien> aliens;                        // Lista de aliens
 std::vector<projectilePlayer> projectilePlayers;  // Lista de proyectiles
 pthread_mutex_t projectilePlayer_mutex;           // Mutex para proteger la lista de proyectiles
+pthread_mutex_t aliens_mutex;                     // Mutex para proteger la lista de aliens
 bool fire_projectilePlayer = false;               // Bandera para indicar cuándo disparar un proyectil
 
 // Dimensiones de la pantalla
 int max_y, max_x;
 int limx1 = 1, limx2, limy1 = 2, limy2;
 
+
 // Estructura de la nave
 const char* nave[] = {" A", "/_\\"};
 int x_nave;
 
+// Estrucutra de los aliens
+const char* alien = "/=\\";
+
 // Tiempo del último disparo
 auto last_shot_time = std::chrono::high_resolution_clock::now();
+
+// Variables para patron de movimiento
+int stepLimit;
+int counter;
 
 // Función para inicializar la pantalla ncurses
 void init_screen() {
@@ -43,6 +61,15 @@ void init_screen() {
 
     // Posición inicial de la nave
     x_nave = limx1 + 1;
+
+    //Inicializar aliens
+    pthread_mutex_lock(&aliens_mutex);
+
+    // Crear 5 alienígenas 
+    for (int i = 0; i < 5; ++i) {
+        aliens.push_back({(limx1 + 8) + i * 8, limy1 + ( (i % 2 == 0) ? 4 : 2 ), true});
+    }
+    pthread_mutex_unlock(&aliens_mutex);
 }
 
 // Función para dibujar los bordes del juego
@@ -88,6 +115,15 @@ void handle_shooting() {
     pthread_mutex_unlock(&projectilePlayer_mutex);
 }
 
+// Función para dibujar los alienígenas
+void draw_aliens() {
+    pthread_mutex_lock(&aliens_mutex);
+    for (const auto& alienObject : aliens) {
+        mvprintw(alienObject.y, alienObject.x, alien);  
+    }
+    pthread_mutex_unlock(&aliens_mutex);
+}
+
 // Función para capturar la entrada del jugador y mover la nave
 void handle_input() {
     int ch = getch();
@@ -130,13 +166,72 @@ void* projectile_thread(void* arg) {
     return NULL;
 }
 
+// Generador de numeros aleatorios
+int generate_random_int(int min, int max) {
+    std::random_device rd;
+    std::mt19937 gen(rd());
+    std::uniform_int_distribution<> distrib(min, max);
+    return distrib(gen);
+}
+
+// Función que se ejecuta en el hilo de los alienígenas
+void* alien_thread(void* arg) {
+    stepLimit = generate_random_int(0,limx2 * 2);  // Límite inicial de pasos
+    counter = 0;    // Contador de pasos
+
+    while (true) {
+        pthread_mutex_lock(&aliens_mutex);
+
+        // Comprobar si se debe cambiar de dirección después de alcanzar el límite de pasos
+        if (counter > stepLimit) {
+            for (auto& alien : aliens) {
+                alien.direction = !alien.direction;  // Cambiar la dirección de todos los alienígenas
+                alien.y++;  // Todos bajan una línea
+            }
+            counter = 0;  // Reiniciar el contador
+            stepLimit = generate_random_int(0,limx2 * 2); 
+        }
+
+        // Mover alienígenas de acuerdo a su dirección actual
+        for (auto& alien : aliens) {
+            if (alien.direction) {
+                alien.x++;  // Mover hacia la derecha
+                if (alien.x >= limx2) {
+                    alien.direction = false;  // Cambiar dirección cuando alcanzan el límite derecho
+                    alien.y++;
+                }
+            } else {
+                alien.x--;  // Mover hacia la izquierda
+                if (alien.x <= limx1) {
+                    alien.direction = true;  // Cambiar dirección cuando alcanzan el límite izquierdo
+                    alien.y++;
+                }
+            }
+        }
+
+        counter++;  // Incrementar el contador después de cada movimiento
+
+        pthread_mutex_unlock(&aliens_mutex);
+        usleep(120000);  // Controlar la velocidad de los alienígenas
+    }
+
+    return NULL;
+}
+
+
+
 int main() {
     init_screen();  // Inicializar ncurses y pantalla
     pthread_mutex_init(&projectilePlayer_mutex, NULL);
+    pthread_mutex_init(&aliens_mutex, NULL);
 
     // Crear el hilo para manejar los proyectiles
     pthread_t projectile_tid;
     pthread_create(&projectile_tid, NULL, projectile_thread, NULL);
+
+    // Crear el hilo para manejar los alienígenas
+    pthread_t alien_tid;
+    pthread_create(&alien_tid, NULL, alien_thread, NULL);
 
     // Bucle principal del juego
     while (true) {
@@ -144,6 +239,7 @@ int main() {
 
         draw_borders();      // Dibujar los bordes del juego
         draw_ship();         // Dibujar la nave
+        draw_aliens();       // Dibujar los aliens
         handle_input();      // Manejar la entrada del usuario
         handle_shooting();   // Manejar los disparos
         draw_projectiles();  // Dibujar los proyectiles
