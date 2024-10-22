@@ -58,6 +58,16 @@ auto last_shot_time = std::chrono::high_resolution_clock::now();
 int stepLimit;
 int counter;
 
+// Función para inicializar colores 
+void init_colors() {
+    start_color();
+    init_pair(1, COLOR_GREEN, COLOR_BLACK);   // Primera oleada
+    init_pair(2, COLOR_YELLOW, COLOR_BLACK);  // Segunda oleada
+    init_pair(3, COLOR_RED, COLOR_BLACK);     // Tercera oleada
+    init_pair(4, COLOR_MAGENTA, COLOR_BLACK); // Cuarta oleada
+    init_pair(5, COLOR_CYAN, COLOR_BLACK);    // Quinta oleada
+}
+
 // Función para inicializar la pantalla ncurses
 void init_screen() {
     initscr();
@@ -67,6 +77,8 @@ void init_screen() {
     timeout(100);
     timeout(0); 
     nodelay(stdscr, TRUE); 
+    init_colors(); 
+
 
     // Inicializar las dimensiones de la pantalla
     getmaxyx(stdscr, max_y, max_x);
@@ -87,6 +99,9 @@ void init_screen() {
     }
     pthread_mutex_unlock(&aliens_mutex);
 }
+
+
+
 
 // Función para dibujar los bordes del juego
 
@@ -198,11 +213,18 @@ void draw_projectiles() {
 // Función para dibujar los alienígenas
 void draw_aliens() {
     pthread_mutex_lock(&aliens_mutex);
+
+    int color_pair = current_round + 1;  // Definir el color según la oleada actual (ronda)
+
     for (const auto& alienObject : aliens) {
-        mvprintw(alienObject.y, alienObject.x, alien);  
+        attron(COLOR_PAIR(color_pair));  // Activar el color según la ronda
+        mvprintw(alienObject.y, alienObject.x, alien);
+        attroff(COLOR_PAIR(color_pair)); // Desactivar el color
     }
+
     pthread_mutex_unlock(&aliens_mutex);
 }
+
 
 // Función para detectar colisiones y eliminar aliens
 void detect_collisions() {
