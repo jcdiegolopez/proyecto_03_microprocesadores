@@ -27,6 +27,7 @@ std::vector<Alien> aliens;                        // Lista de aliens
 std::vector<projectile> projectilePlayers;        // Lista de proyectiles de jugador
 std::vector<projectile> projectileAliens;         // Lista de proyectiles aliens
 Player player;                                      // Jugador
+pthread_mutex_t round_mutex;                        // Mutex para la ronda
 pthread_mutex_t player_mutex;                       // Mutex para el jugador
 pthread_mutex_t projectile_mutex;                   // Mutex para proteger la lista de proyectiles
 pthread_mutex_t aliens_mutex;                     // Mutex para proteger la lista de aliens
@@ -35,6 +36,10 @@ int score = 0;                                    // Variable para almacenar el 
 int current_round = 0;                              // Variable para almacenar el número de rondas
 int group_size, max_rounds;                         // Variables para el tamaño de los grupos y el número máximo de rondas  
 std::mt19937 gen;                                   // Generador de números aleatorios
+
+pthread_cond_t fire_condition;                      // Condición para disparar proyectiles
+pthread_cond_t round_condition;                     // Condición para cambiar de ronda
+
 
 // Dimensiones de la pantalla
 int max_y, max_x;
@@ -107,6 +112,7 @@ int show_game_mode_menu() {
 // Función para inicializar los alienígenas según el modo seleccionado
 void init_aliens(int mode) {
     pthread_mutex_lock(&aliens_mutex);
+    pthread_mutex_lock(&round_mutex);
     aliens.clear();
 
     group_size = (mode == 1) ? 8 : 10;
@@ -117,21 +123,23 @@ void init_aliens(int mode) {
     for (int j = 0; j < group_size; ++j) {
         aliens.push_back({(limx1 + 2) + j * 5,  limy1 + current_round + ((j % 2 == 0) ? 4 : 2), true});
     }
-
+    pthread_mutex_unlock(&round_mutex);
     pthread_mutex_unlock(&aliens_mutex);
 }
 
 // Función para cargar la siguiente ronda de aliens
 void next_round() {
+    
     if (current_round < max_rounds - 1) {
         current_round++;
-        
         aliens.clear();  // Limpiar los aliens anteriores
         for (int j = 0; j < group_size; ++j) {
             aliens.push_back({(limx1 + 2) + j * 5, limy1 + current_round + ((j % 2 == 0) ? 4 : 2), true});
         }
         
+        pthread_cond_signal(&round_condition);  // Notificar a otros hilos que la ronda ha cambiado
     }
+    
 }
 
 // Función para verificar si el jugador ha ganado
@@ -140,16 +148,19 @@ void check_victory(int mode) {
     
     // Verificamos si la lista de aliens está vacía
     if (aliens.empty()) {  
+        pthread_mutex_lock(&round_mutex);
         if (current_round < max_rounds - 1) {
-            next_round();  // Iniciar la siguiente ronda
+             pthread_cond_signal(&round_condition); // Notificar al hilo de cambio de ronda
         } else if ((mode == 1 && score >= 400) || (mode == 2 && score >= 500)) {
             mvprintw(limy2 / 2, limx2 / 2 - 5, "You Win!");
             refresh();
             sleep(2);
             endwin();
+            pthread_mutex_unlock(&round_mutex);
             pthread_mutex_unlock(&aliens_mutex);  // Desbloquear antes de salir
             exit(0);  // Terminar el juego al ganar
         }
+        pthread_mutex_unlock(&round_mutex);
     }
 
     pthread_mutex_unlock(&aliens_mutex);
@@ -182,21 +193,7 @@ void draw_projectiles() {
     pthread_mutex_unlock(&projectile_mutex);
 }
 
-// Función para manejar el disparo de proyectiles
-void handle_shooting() {
-    pthread_mutex_lock(&projectile_mutex);
-    if (fire_projectilePlayer) {
-        auto now = std::chrono::high_resolution_clock::now();
-        auto duration = std::chrono::duration_cast<std::chrono::milliseconds>(now - last_shot_time).count();
-        
-        if (duration >= 500) {
-            projectilePlayers.push_back({player.x + 1, player.y - 1});  // Disparar desde la nave
-            fire_projectilePlayer = false;  // Resetear la bandera
-            last_shot_time = now;
-        }
-    }
-    pthread_mutex_unlock(&projectile_mutex);
-}
+
 
 // Función para dibujar los alienígenas
 void draw_aliens() {
@@ -330,8 +327,9 @@ void* input_thread(void* arg) {
         } else if (ch == KEY_RIGHT && player.x < COLS - 1) {
             player.x++;  // Mover la nave a la derecha
         } else if (ch == ' ') {
-            pthread_mutex_lock(&projectile_mutex);  // Proteger la bandera de disparo
-            fire_projectilePlayer = true;  // Disparar proyectil
+            pthread_mutex_lock(&projectile_mutex);  
+            fire_projectilePlayer = true;  // Activar la bandera de disparo
+            pthread_cond_signal(&fire_condition);  // Notificar al hilo de disparo que puede disparar
             pthread_mutex_unlock(&projectile_mutex);
         } else if (ch == 'q') {
             // Terminar el juego si presiona 'q'
@@ -344,6 +342,22 @@ void* input_thread(void* arg) {
         pthread_mutex_unlock(&player_mutex);
 
         usleep(30000);  // Control de la velocidad de lectura de entrada
+    }
+    return NULL;
+}
+
+// Función para manejar el disparo de proyectiles
+void* handle_shooting(void* arg) {
+    while (true) {
+        pthread_mutex_lock(&projectile_mutex);
+        while (!fire_projectilePlayer) {
+            pthread_cond_wait(&fire_condition, &projectile_mutex);  // Esperar hasta que se notifique el disparo
+        }
+        // Disparar el proyectil
+        projectilePlayers.push_back({player.x + 1, player.y - 1});
+        fire_projectilePlayer = false;
+        pthread_mutex_unlock(&projectile_mutex);
+        usleep(500000);  // Esperar 500ms antes del próximo disparo
     }
     return NULL;
 }
@@ -393,10 +407,34 @@ void* alien_thread(void* arg) {
     return NULL;
 }
 
+// Subrutina deteccion de colisions
+void* collision_thread(void* arg) {
+    while (true) {
+        detect_collisions();     // Detectar colisiones entre proyectiles y aliens
+        detect_collision_ship(); // Detectar colisión con la nave (jugador)
+        usleep(30000);           // Frecuencia de verificación de colisiones
+    }
+    return NULL;
+}
+
+// Subrutina deteccion de cambio de ronda
+void* next_round_thread(void* arg) {
+    while (true) {
+        pthread_mutex_lock(&aliens_mutex);
+        pthread_cond_wait(&round_condition, &aliens_mutex);  // Esperar hasta que se eliminen todos los aliens
+        next_round();  // Iniciar la siguiente ronda
+        pthread_mutex_unlock(&aliens_mutex);
+    }
+    return NULL;
+}
+
+
 // Función para mostrar el puntaje
 void draw_info() {
     pthread_mutex_lock(&player_mutex);
+    pthread_mutex_lock(&round_mutex);
     mvprintw(1, 2, "Score: %d  Lives: %d  Round: %d/%d", score, player.lives, current_round + 1, max_rounds);
+    pthread_mutex_unlock(&round_mutex);
     pthread_mutex_unlock(&player_mutex);
 }
 
@@ -408,6 +446,8 @@ int main() {
         pthread_mutex_init(&projectile_mutex, NULL);
         pthread_mutex_init(&aliens_mutex, NULL);
         pthread_mutex_init(&player_mutex, NULL);
+        pthread_cond_init(&fire_condition, NULL);
+        pthread_cond_init(&round_condition, NULL);
 
         // Inicializar los alienígenas de acuerdo al modo seleccionado
         init_aliens(mode);
@@ -424,6 +464,18 @@ int main() {
         pthread_t input_tid;
         pthread_create(&input_tid, NULL, input_thread, NULL);
 
+        // Hilo para manejar las colisiones
+        pthread_t collision_tid;
+        pthread_create(&collision_tid, NULL, collision_thread, NULL);
+
+        // Hilo para manejar disparos
+        pthread_t shooting_tid;
+        pthread_create(&shooting_tid, NULL, handle_shooting, NULL);
+
+        // Hilo para manejo de cambio de rongas
+        pthread_t roundchange_tid;
+        pthread_create(&roundchange_tid, NULL, next_round_thread, NULL);
+
         // Bucle principal del juego
         while (true) {
             clear();  // Limpiar la pantalla
@@ -431,10 +483,10 @@ int main() {
             draw_borders();      // Dibujar los bordes del juego
             draw_ship();         // Dibujar la nave
             draw_aliens();       // Dibujar los aliens
-            handle_shooting();   // Manejar los disparos
+            // handle_shooting();   // Manejar los disparos
             draw_projectiles();  // Dibujar los proyectiles
-            detect_collisions(); // Detectar colisiones
-            detect_collision_ship(); // Detectar colisión con la nave
+            // detect_collisions(); // Detectar colisiones
+            // detect_collision_ship(); // Detectar colisión con la nave
             draw_info();         // Mostrar el puntaje y las vidas
             check_victory(mode);     // Verificar si el jugador ha ganado
 
@@ -442,7 +494,11 @@ int main() {
             usleep(30000);  // Controlar la velocidad del juego
         }
     }
-
+    
+    pthread_mutex_destroy(&projectile_mutex);
+    pthread_mutex_destroy(&aliens_mutex);
+    pthread_mutex_destroy(&player_mutex);
+    pthread_cond_destroy(&fire_condition);
     return 0;
 }
 
