@@ -32,6 +32,8 @@ pthread_mutex_t projectile_mutex;                   // Mutex para proteger la li
 pthread_mutex_t aliens_mutex;                     // Mutex para proteger la lista de aliens
 bool fire_projectilePlayer = false;               // Bandera para indicar cuándo disparar un proyectil
 int score = 0;                                    // Variable para almacenar el puntaje
+int current_round = 0;                              // Variable para almacenar el número de rondas
+int group_size, max_rounds;                         // Variables para el tamaño de los grupos y el número máximo de rondas  
 std::mt19937 gen;                                   // Generador de números aleatorios
 
 // Dimensiones de la pantalla
@@ -82,6 +84,77 @@ void init_screen() {
 }
 
 // Función para dibujar los bordes del juego
+
+int show_game_mode_menu() {
+    int choice;
+    clear();
+    mvprintw(5, 10, "Select Game Mode:");
+    mvprintw(7, 12, "1. Mode 1 (40 Aliens, Groups of 8)");
+    mvprintw(8, 12, "2. Mode 2 (50 Aliens, Groups of 10)");
+    mvprintw(10, 12, "Press 1 or 2 to choose");
+    refresh();
+
+    while (true) {
+        choice = getch();
+        if (choice == '1') {
+            return 1;  // Modo 1
+        } else if (choice == '2') {
+            return 2;  // Modo 2
+        }
+    }
+}
+
+// Función para inicializar los alienígenas según el modo seleccionado
+void init_aliens(int mode) {
+    pthread_mutex_lock(&aliens_mutex);
+    aliens.clear();
+
+    group_size = (mode == 1) ? 8 : 10;
+    max_rounds = (mode == 1) ? 5 : 5;
+    current_round = 0;  // Comenzamos en la primera ronda
+
+    // Inicializar la primera ronda
+    for (int j = 0; j < group_size; ++j) {
+        aliens.push_back({(limx1 + 2) + j * 5,  limy1 + current_round + ((j % 2 == 0) ? 4 : 2), true});
+    }
+
+    pthread_mutex_unlock(&aliens_mutex);
+}
+
+// Función para cargar la siguiente ronda de aliens
+void next_round() {
+    if (current_round < max_rounds - 1) {
+        current_round++;
+        
+        aliens.clear();  // Limpiar los aliens anteriores
+        for (int j = 0; j < group_size; ++j) {
+            aliens.push_back({(limx1 + 2) + j * 5, limy1 + current_round + ((j % 2 == 0) ? 4 : 2), true});
+        }
+        
+    }
+}
+
+// Función para verificar si el jugador ha ganado
+void check_victory(int mode) {
+    pthread_mutex_lock(&aliens_mutex);
+    
+    // Verificamos si la lista de aliens está vacía
+    if (aliens.empty()) {  
+        if (current_round < max_rounds - 1) {
+            next_round();  // Iniciar la siguiente ronda
+        } else if ((mode == 1 && score >= 400) || (mode == 2 && score >= 500)) {
+            mvprintw(limy2 / 2, limx2 / 2 - 5, "You Win!");
+            refresh();
+            sleep(2);
+            endwin();
+            pthread_mutex_unlock(&aliens_mutex);  // Desbloquear antes de salir
+            exit(0);  // Terminar el juego al ganar
+        }
+    }
+
+    pthread_mutex_unlock(&aliens_mutex);
+}
+
 void draw_borders() {
     mvvline(limy1 + 1, limx1 - 1, '|', limy2 - limy1 - 1);
     mvvline(limy1 + 1, limx2 + 3, '|', limy2 - limy1 - 1);
@@ -132,26 +205,6 @@ void draw_aliens() {
         mvprintw(alienObject.y, alienObject.x, alien);  
     }
     pthread_mutex_unlock(&aliens_mutex);
-}
-
-// Función para capturar la entrada del jugador y mover la nave
-void handle_input() {
-    int ch = getch();
-
-    if (ch == KEY_LEFT && player.x > limx1) {
-        player.x--;  // Mover la nave a la izquierda
-    } else if (ch == KEY_RIGHT && player.x < limx2) {
-        player.x++;  // Mover la nave a la derecha
-    } else if (ch == ' ') {
-        pthread_mutex_lock(&projectile_mutex);
-        fire_projectilePlayer = true;  // Indicar que se disparó un proyectil
-        pthread_mutex_unlock(&projectile_mutex);
-    } else if (ch == 'q') {
-        // Si presiona 'q', terminar el juego
-        endwin();
-        pthread_mutex_destroy(&projectile_mutex);
-        exit(0);
-    }
 }
 
 // Función para detectar colisiones y eliminar aliens
@@ -211,8 +264,6 @@ void detect_collision_ship() {
     pthread_mutex_unlock(&player_mutex);
 }
 
-
-
 // Función que se ejecuta en el hilo de los proyectiles
 void* projectile_thread(void* arg) {
     while (true) {
@@ -244,9 +295,6 @@ void* projectile_thread(void* arg) {
     return NULL;
 }
 
-
-
-
 // Inicializar el generador con un valor aleatorio una vez al inicio del programa
 void init_random_generator() {
     std::random_device rd;
@@ -259,7 +307,6 @@ int generate_random_int(int min, int max) {
     return distrib(gen);  // Usar el generador ya inicializado
 }
 
-
 void generate_alien_projectiles() {
     pthread_mutex_lock(&projectile_mutex);
     for (const auto& alien : aliens) {
@@ -271,6 +318,35 @@ void generate_alien_projectiles() {
     pthread_mutex_unlock(&projectile_mutex);
 }
 
+// manejar entrada del jugador
+void* input_thread(void* arg) {
+    while (true) {
+        int ch = getch();  // Captura de teclas en modo no bloqueante
+
+        pthread_mutex_lock(&player_mutex);  // Protege el acceso al jugador y sus variables
+
+        if (ch == KEY_LEFT && player.x > 0) {
+            player.x--;  // Mover la nave a la izquierda
+        } else if (ch == KEY_RIGHT && player.x < COLS - 1) {
+            player.x++;  // Mover la nave a la derecha
+        } else if (ch == ' ') {
+            pthread_mutex_lock(&projectile_mutex);  // Proteger la bandera de disparo
+            fire_projectilePlayer = true;  // Disparar proyectil
+            pthread_mutex_unlock(&projectile_mutex);
+        } else if (ch == 'q') {
+            // Terminar el juego si presiona 'q'
+            endwin();
+            pthread_mutex_destroy(&player_mutex);
+            pthread_mutex_destroy(&projectile_mutex);
+            exit(0);
+        }
+
+        pthread_mutex_unlock(&player_mutex);
+
+        usleep(30000);  // Control de la velocidad de lectura de entrada
+    }
+    return NULL;
+}
 
 // Función que se ejecuta en el hilo de los alienígenas
 void* alien_thread(void* arg) {
@@ -320,42 +396,61 @@ void* alien_thread(void* arg) {
 // Función para mostrar el puntaje
 void draw_info() {
     pthread_mutex_lock(&player_mutex);
-    mvprintw(1, 2, "Score: %d  Lives: %d", score, player.lives);
+    mvprintw(1, 2, "Score: %d  Lives: %d  Round: %d/%d", score, player.lives, current_round + 1, max_rounds);
     pthread_mutex_unlock(&player_mutex);
 }
 
 int main() {
-    init_screen();  // Inicializar ncurses y pantalla
-    init_random_generator();  // Inicializar el generador aleatorio
-    pthread_mutex_init(&projectile_mutex, NULL);
-    pthread_mutex_init(&aliens_mutex, NULL);
-    pthread_mutex_init(&player_mutex, NULL);
-
-    // Crear el hilo para manejar los proyectiles
-    pthread_t projectile_tid;
-    pthread_create(&projectile_tid, NULL, projectile_thread, NULL);
-
-    // Crear el hilo para manejar los alienígenas
-    pthread_t alien_tid;
-    pthread_create(&alien_tid, NULL, alien_thread, NULL);
-
-    // Bucle principal del juego
     while (true) {
-        clear();  // Limpiar la pantalla
+        init_screen();  // Inicializar ncurses y pantalla
+        int mode = show_game_mode_menu();  // Mostrar el menú de selección de modo
+        init_random_generator();  // Inicializar el generador aleatorio
+        pthread_mutex_init(&projectile_mutex, NULL);
+        pthread_mutex_init(&aliens_mutex, NULL);
+        pthread_mutex_init(&player_mutex, NULL);
 
-        draw_borders();      // Dibujar los bordes del juego
-        draw_ship();         // Dibujar la nave
-        draw_aliens();       // Dibujar los aliens
-        handle_input();      // Manejar la entrada del usuario
-        handle_shooting();   // Manejar los disparos
-        draw_projectiles();  // Dibujar los proyectiles
-        detect_collisions(); // Detectar colisiones
-        detect_collision_ship(); // Detectar colisión con la nave
-        draw_info();        // Mostrar el puntaje
+        // Inicializar los alienígenas de acuerdo al modo seleccionado
+        init_aliens(mode);
 
-        refresh();
-        usleep(30000);  // Controlar la velocidad del juego
+        // Crear el hilo para manejar los proyectiles
+        pthread_t projectile_tid;
+        pthread_create(&projectile_tid, NULL, projectile_thread, NULL);
+
+        // Crear el hilo para manejar los alienígenas
+        pthread_t alien_tid;
+        pthread_create(&alien_tid, NULL, alien_thread, NULL);
+
+        // Hilo de entrada (teclado)
+        pthread_t input_tid;
+        pthread_create(&input_tid, NULL, input_thread, NULL);
+
+        // Bucle principal del juego
+        while (true) {
+            clear();  // Limpiar la pantalla
+
+            draw_borders();      // Dibujar los bordes del juego
+            draw_ship();         // Dibujar la nave
+            draw_aliens();       // Dibujar los aliens
+            handle_shooting();   // Manejar los disparos
+            draw_projectiles();  // Dibujar los proyectiles
+            detect_collisions(); // Detectar colisiones
+            detect_collision_ship(); // Detectar colisión con la nave
+            draw_info();         // Mostrar el puntaje y las vidas
+            check_victory(mode);     // Verificar si el jugador ha ganado
+
+            refresh();
+            usleep(30000);  // Controlar la velocidad del juego
+        }
     }
 
     return 0;
+}
+
+// Función para regresar al menú después de perder
+void game_over() {
+    mvprintw(limy2 / 2, limx2 / 2 - 5, "Game Over!");
+    refresh();
+    sleep(2);  // Pausa de 2 segundos para que el jugador vea el mensaje
+    endwin();  // Terminar ncurses
+    main();    // Regresar al menú principal
 }
